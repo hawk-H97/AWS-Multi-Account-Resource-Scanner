@@ -390,10 +390,6 @@ Your Machine
 
 ---
 
-## 📄 License
-
-MIT License — see [LICENSE](LICENSE) for details.
-
 ---
 
 ## 🤝 Contributing
