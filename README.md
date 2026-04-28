@@ -152,7 +152,7 @@ aws-scan-results/
 │   ├── aws_inventory_123456789012_20250428_1045.xlsx   ← Excel report
 │   └── scan.log                                        ← Full scan log
 ├── scan2_20250428/
-│   ├── aws_inventory_987654321098_20250428_1045.xlsx
+│   ├── aws_inventory_8856654321098_20250428_1045.xlsx
 │   └── scan.log
 └── .running_20250428_104500                            ← Temp session file (auto-deleted)
 ```
