@@ -1412,10 +1412,16 @@ def write_data_sheet(wb, title, records):
 
 def _output_path(filename):
     """
-    Always write output to /scanner (Docker volume mount).
-    Falls back to current directory if /scanner doesn't exist (local run).
+    Write output to OUTPUT_DIR env var (set by Docker to /scanner).
+    Falls back to /scanner if exists, then current directory for local runs.
+    This separates the script location (/app) from output location (/scanner)
+    so the volume mount never overwrites aws_scan.py.
     """
-    out_dir = '/scanner' if os.path.isdir('/scanner') else '.'
+    out_dir = (
+        os.environ.get('OUTPUT_DIR')          # Docker sets this to /scanner
+        or ('/scanner' if os.path.isdir('/scanner') else '.')
+    )
+    os.makedirs(out_dir, exist_ok=True)
     return os.path.join(out_dir, filename)
 
 
