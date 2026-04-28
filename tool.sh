@@ -26,18 +26,41 @@ declare -a ACTIVE_CONTAINERS=()
 
 # ── Cleanup on Ctrl+C ─────────────────────────────────────────────────────────
 cleanup() {
+    # Restore terminal immediately so output is visible
+    stty sane  2>/dev/null || true
+    stty echo  2>/dev/null || true
+
     echo ""
     echo -e "${YELLOW}  *** Interrupted — stopping all running containers... ***${RESET}"
+
     for cname in "${ACTIVE_CONTAINERS[@]:-}"; do
         if docker ps -q --filter "name=${cname}" | grep -q .; then
             echo -e "  Stopping container: ${cname}"
             docker stop "${cname}" >/dev/null 2>&1 || true
             docker rm   "${cname}" >/dev/null 2>&1 || true
-            echo -e "  ${GREEN}Deleted: ${cname}${RESET}"
+            echo -e "  ${GREEN}Stopped & removed: ${cname}${RESET}"
         fi
     done
+
     echo ""
     echo -e "  ${CYAN}Partial results (if any) are in: ${RESULTS_DIR}/${RESET}"
+
+    # Give the Python scanner 2 seconds to finish writing the PARTIAL file
+    sleep 2
+
+    # Show any partial files found
+    echo ""
+    echo -e "  ${BOLD}Partial files saved:${RESET}"
+    local found=0
+    while IFS= read -r -d '' f; do
+        echo -e "  ${GREEN}✓${RESET} ${f}"
+        found=$((found + 1))
+    done < <(find "${RESULTS_DIR}" -name "*_PARTIAL.xlsx" -print0 2>/dev/null)
+    if [[ $found -eq 0 ]]; then
+        echo -e "  ${YELLOW}  (none yet — scan may have been stopped before any region completed)${RESET}"
+    fi
+
+    echo ""
     ask_again_or_exit
 }
 trap cleanup INT TERM
@@ -90,15 +113,15 @@ get_credentials() {
         read -rp "    AWS Access Key ID      : " AWS_ACCESS_KEY_ID
     done
 
-    read -rsp "    AWS Secret Access Key  : " AWS_SECRET_ACCESS_KEY
+    read -rp  "    AWS Secret Access Key  : " AWS_SECRET_ACCESS_KEY
     echo ""
     while [[ -z "${AWS_SECRET_ACCESS_KEY}" ]]; do
         echo -e "    ${RED}Cannot be empty.${RESET}"
-        read -rsp "    AWS Secret Access Key  : " AWS_SECRET_ACCESS_KEY
+        read -rp  "    AWS Secret Access Key  : " AWS_SECRET_ACCESS_KEY
         echo ""
     done
 
-    read -rsp "    AWS Session Token      : " AWS_SESSION_TOKEN
+    read -rp  "    AWS Session Token      : " AWS_SESSION_TOKEN
     echo ""
     echo -e "    ${CYAN}(Press Enter to skip if not using temporary credentials)${RESET}"
 
@@ -193,13 +216,21 @@ show_results_summary() {
 }
 
 ask_again_or_exit() {
+    # Reset terminal to sane state in case Ctrl+C left it broken
+    stty sane 2>/dev/null || true
+
     echo ""
     echo -e "  ${BOLD}Do you want to run more scans?${RESET}"
-    echo -e "  [Y] Yes — scan more accounts"
-    echo -e "  [N] No  — exit the tool"
+    echo -e "  ${GREEN}  [Y]${RESET} Yes — scan more accounts"
+    echo -e "  ${RED}  [N]${RESET} No  — exit the tool"
     echo ""
-    read -rp "  Your choice [Y/N]: " choice
+
+    # Force terminal echo ON so user can see what they type
+    stty echo 2>/dev/null || true
+    read -rp "  Your choice [Y/N]: " choice </dev/tty
+    echo ""
     choice="${choice^^}"
+
     if [[ "${choice}" == "Y" ]]; then
         ACTIVE_CONTAINERS=()
         SCAN_SESSION_ID="$(date +%Y%m%d_%H%M%S)"
