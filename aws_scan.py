@@ -16,6 +16,10 @@ Output file: aws_inventory_ACCOUNTID_YYYYMMDD_HHMM.xlsx
 import boto3
 import datetime
 import json
+import time
+import random
+from botocore.config import Config
+from botocore.exceptions import ClientError
 import os
 import signal
 import sys
@@ -23,6 +27,19 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from collections import defaultdict
+
+# ── boto3 retry config — adaptive mode handles throttling automatically ────────
+#    mode='adaptive'  : dynamically slows down when AWS throttles us
+#    max_attempts=10  : retry up to 10 times before giving up
+#    This costs $0 extra — retried throttled calls are not billed by AWS
+BOTO_CONFIG = Config(
+    retries={
+        'max_attempts': 10,
+        'mode'        : 'adaptive',   # best mode — auto backoff on throttle
+    },
+    connect_timeout = 10,
+    read_timeout    = 30,
+)
 
 # ── EXACT columns as requested ────────────────────────────────────────────────
 COLS = [
@@ -100,11 +117,11 @@ NOW_UTC = datetime.datetime.utcnow()
 
 
 def get_account_id():
-    return boto3.client('sts').get_caller_identity()['Account']
+    return boto3.client('sts', config=BOTO_CONFIG).get_caller_identity()['Account']
 
 
 def get_all_regions():
-    ec2 = boto3.client('ec2', region_name='us-east-1')
+    ec2 = boto3.client('ec2', region_name='us-east-1', config=BOTO_CONFIG)
     return sorted([r['RegionName']
                    for r in ec2.describe_regions(AllRegions=False)['Regions']])
 
@@ -1078,7 +1095,7 @@ def build_cloudtrail_cache(regions, days_back=90):
 
     for region in regions:
         try:
-            ct = boto3.client('cloudtrail', region_name=region)
+            ct = boto3.client('cloudtrail', region_name=region, config=BOTO_CONFIG)
             for event_name in CREATE_EVENTS:
                 token = None
                 while True:
@@ -1131,16 +1148,59 @@ _INTERRUPT_ACCOUNT = ''
 
 
 def _handle_interrupt(signum, frame):
+    # Reset signal to default so a second Ctrl+C force-exits immediately
+    signal.signal(signal.SIGINT,  signal.SIG_DFL)
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
+
     print("\n\n  *** Scan interrupted ***")
-    if _INTERRUPT_RECORDS:
-        print(f"  Saving partial Excel ({len(_INTERRUPT_RECORDS)} resources)...")
-        write_excel(_INTERRUPT_RECORDS, _INTERRUPT_ACCOUNT, partial=True)
-    sys.exit(0)
+    sys.stdout.flush()
+
+    records = list(_INTERRUPT_RECORDS)   # snapshot — safe copy
+    account = _INTERRUPT_ACCOUNT
+
+    if records:
+        print(f"  Collected {len(records)} resources so far.")
+        print(f"  Saving partial Excel file...")
+        sys.stdout.flush()
+        try:
+            filepath = write_excel(records, account, partial=True)
+            print(f"  Partial file saved: {filepath}")
+        except Exception as e:
+            print(f"  ERROR saving partial file: {e}")
+            # Last-resort: try writing to /tmp
+            try:
+                ts  = NOW_UTC.strftime('%Y%m%d_%H%M')
+                fp  = f"/tmp/aws_inventory_{account}_{ts}_PARTIAL.xlsx"
+                import openpyxl as _ox
+                wb  = _ox.Workbook()
+                ws  = wb.active
+                ws.title = 'Partial'
+                ws.append(list(COLS))
+                for rec in records:
+                    ws.append([str(rec.get(c,'') or '') for c in COLS])
+                wb.save(fp)
+                print(f"  Fallback partial saved to: {fp}")
+            except Exception as e2:
+                print(f"  Fallback also failed: {e2}")
+    else:
+        print("  No records collected yet — no partial file created.")
+
+    sys.stdout.flush()
+    os._exit(0)   # use os._exit to bypass atexit hooks that could hang
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN SCAN
 # ══════════════════════════════════════════════════════════════════════════════
+
+def safe_sleep(seconds=0.5):
+    """
+    Small sleep between service scans within same region.
+    Prevents burst throttling when hitting many services back-to-back.
+    Cost: $0. Benefit: avoids RequestLimitExceeded errors.
+    """
+    time.sleep(seconds)
+
 
 def scan_all(account_id, regions):
     global _INTERRUPT_RECORDS, _INTERRUPT_ACCOUNT
@@ -1149,6 +1209,7 @@ def scan_all(account_id, regions):
     seen_arns = set()
 
     def add(recs):
+        global _INTERRUPT_RECORDS
         for r in recs:
             arn = r.get('ARN', '')
             if arn and arn in seen_arns:
@@ -1156,24 +1217,25 @@ def scan_all(account_id, regions):
             if arn:
                 seen_arns.add(arn)
             records.append(r)
-            _INTERRUPT_RECORDS = records
+        # Update global snapshot after every batch so interrupt always has latest
+        _INTERRUPT_RECORDS = records[:]   # shallow copy — safe for interrupt
 
     # Global services
     print("\n  [Global] IAM...")
-    iam = boto3.client('iam', region_name='us-east-1')
+    iam = boto3.client('iam', region_name='us-east-1', config=BOTO_CONFIG)
     add(scan_iam_users(iam, account_id))
     add(scan_iam_roles(iam, account_id))
     add(scan_iam_policies(iam, account_id))
     add(scan_iam_groups(iam, account_id))
 
     print("  [Global] S3...")
-    add(scan_s3(boto3.client('s3', region_name='us-east-1'), account_id))
+    add(scan_s3(boto3.client('s3', region_name='us-east-1', config=BOTO_CONFIG), account_id))
 
     print("  [Global] Route53...")
-    add(scan_route53(boto3.client('route53', region_name='us-east-1'), account_id))
+    add(scan_route53(boto3.client('route53', region_name='us-east-1', config=BOTO_CONFIG), account_id))
 
     print("  [Global] CloudFront...")
-    add(scan_cloudfront(boto3.client('cloudfront', region_name='us-east-1'), account_id))
+    add(scan_cloudfront(boto3.client('cloudfront', region_name='us-east-1', config=BOTO_CONFIG), account_id))
 
     # Regional services
     total = len(regions)
@@ -1181,7 +1243,7 @@ def scan_all(account_id, regions):
         print(f"\n  [{idx:>2}/{total}] {region}")
 
         def c(svc, r=region):
-            return boto3.client(svc, region_name=r)
+            return boto3.client(svc, region_name=r, config=BOTO_CONFIG)
 
         ec2 = c('ec2')
         for fn in [
@@ -1348,10 +1410,20 @@ def write_data_sheet(wb, title, records):
         ws.column_dimensions[get_column_letter(ci)].width = w + 3
 
 
+def _output_path(filename):
+    """
+    Always write output to /scanner (Docker volume mount).
+    Falls back to current directory if /scanner doesn't exist (local run).
+    """
+    out_dir = '/scanner' if os.path.isdir('/scanner') else '.'
+    return os.path.join(out_dir, filename)
+
+
 def write_excel(records, account_id, partial=False):
     ts       = NOW_UTC.strftime('%Y%m%d_%H%M')
     suffix   = '_PARTIAL' if partial else ''
     filename = f"aws_inventory_{account_id}_{ts}{suffix}.xlsx"
+    filepath = _output_path(filename)
 
     wb = openpyxl.Workbook()
     wb.remove(wb.active)
@@ -1367,11 +1439,11 @@ def write_excel(records, account_id, partial=False):
         write_data_sheet(wb, svc[:31], by_svc[svc])
         print(f"  Sheet: {svc:<30} ({len(by_svc[svc])})")
 
-    wb.save(filename)
-    print(f"\n  Saved   : {filename}")
+    wb.save(filepath)
+    print(f"\n  Saved   : {filepath}")
     print(f"  Services: {len(by_svc)}")
     print(f"  Total   : {len(records)}")
-    return filename
+    return filepath
 
 
 # ══════════════════════════════════════════════════════════════════════════════
