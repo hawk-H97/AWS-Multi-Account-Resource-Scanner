@@ -96,8 +96,38 @@ build_image() {
     echo ""
     echo -e "  ${BOLD}Building scanner Docker image...${RESET}"
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    docker build -t "${IMAGE_NAME}" "${SCRIPT_DIR}" -f "${SCRIPT_DIR}/Dockerfile" \
-        --quiet && echo -e "  ${GREEN}✓ Image built: ${IMAGE_NAME}${RESET}"
+
+    # ── Step 1: Verify required files exist ───────────────────────────────────
+    if [[ ! -f "${SCRIPT_DIR}/aws_scan.py" ]]; then
+        echo -e "${RED}  ERROR: aws_scan.py not found in: ${SCRIPT_DIR}${RESET}"
+        echo -e "  Make sure aws_scan.py and tool.sh are in the same folder."
+        exit 1
+    fi
+    if [[ ! -f "${SCRIPT_DIR}/Dockerfile" ]]; then
+        echo -e "${RED}  ERROR: Dockerfile not found in: ${SCRIPT_DIR}${RESET}"
+        exit 1
+    fi
+
+    # ── Step 2: Remove old image automatically (no manual step needed) ────────
+    # Ensures updated aws_scan.py is always used — never a stale cache.
+    if docker image inspect "${IMAGE_NAME}" &>/dev/null; then
+        echo -e "  ${YELLOW}Removing old cached image: ${IMAGE_NAME}...${RESET}"
+        docker rmi "${IMAGE_NAME}" --force &>/dev/null || true
+        echo -e "  ${GREEN}✓ Old image removed${RESET}"
+    fi
+
+    # ── Step 3: Build fresh image ─────────────────────────────────────────────
+    echo -e "  ${CYAN}Building fresh image (this takes ~1 min first time)...${RESET}"
+    if docker build \
+        --no-cache \
+        -t "${IMAGE_NAME}" \
+        -f "${SCRIPT_DIR}/Dockerfile" \
+        "${SCRIPT_DIR}" 2>&1 | tail -5; then
+        echo -e "  ${GREEN}✓ Image built successfully: ${IMAGE_NAME}${RESET}"
+    else
+        echo -e "${RED}  ERROR: Docker build failed — see output above.${RESET}"
+        exit 1
+    fi
 }
 
 get_credentials() {
@@ -148,7 +178,8 @@ run_container() {
     local docker_args=(
         --name   "${cname}"
         --rm                              # auto-delete when done
-        -v       "${out_dir}:/scanner"    # output goes to host
+        -v       "${out_dir}:/scanner"    # output volume — Excel + logs go here
+        -e       "OUTPUT_DIR=/scanner"    # tells aws_scan.py where to write Excel
         -e       "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
         -e       "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
         -e       "AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION}"
