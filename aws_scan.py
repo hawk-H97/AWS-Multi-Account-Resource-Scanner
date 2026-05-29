@@ -157,7 +157,7 @@ def make_rec(account_id, name, rtype, service, arn, region,
         "ARN"             : arn,
         "Region"          : region,
         "Owning Account"  : account_id,      # filled; overridden if cross-account
-        "Tags"            : fmt_tags(tags) if isinstance(tags, list) else (tags or ''),
+        "Tags"            : fmt_tags(tags) if tags else '',
         "Created Date"    : created,
         "Created By"      : '',              # filled by CloudTrail pass
         "Status"          : status,
